@@ -23,7 +23,18 @@ class SlidingWindowWrapper(torch.utils.data.Dataset):
     """
     def __init__(self, seqs, lookback=20, lookahead=1, normalized=False, roll=True, min=None, max=None):
         self.seqs_cum = seqs
-        self.seqs = deepcopy(self.seqs_cum)
+        ## added by Yahya on 18/07/2025
+        self.seqs = []
+        for seq in self.seqs_cum:
+            if isinstance(seq, torch.Tensor):
+                arr = seq.detach().cpu().numpy()
+            else:
+                arr = seq
+            # make a writable copy
+            self.seqs.append(arr.copy())
+        
+        self.seqs = deepcopy(self.seqs)
+        ################################
         for i, seq in enumerate(self.seqs):
             self.seqs[i][:, 0] = np.diff(seq[:, 0], axis=0, prepend=0)
             
