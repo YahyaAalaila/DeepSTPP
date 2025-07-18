@@ -27,30 +27,57 @@ class PositionalEncoding(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
         self.max_len = max_len
         
-        if torch.cuda.is_available():
-            self.device = torch.device('cuda:0')
-        else:
-            self.device = torch.device("cpu")
-
     def forward(self, x, t):
-        pe = torch.zeros(self.max_len, self.d_model).to(self.device)
-        
-        div_term = torch.exp(torch.arange(0, self.d_model, 2).float() * (-math.log(10000.0) / self.d_model)).to(self.device)
-        
-        t = t.unsqueeze(-1)
-        pe = torch.zeros(*t.shape[:2], self.d_model).to(self.device)
+        # allocate on the same device as x
+        dev = x.device
+
+        # full‐length positional buffer (unused except for shape)
+        # but we only actually need the t‐shaped one below
+        # pe_full = torch.zeros(self.max_len, self.d_model, device=dev)
+
+        # precompute the frequency terms on the correct device
+        div_term = torch.exp(
+            torch.arange(0, self.d_model, 2, device=dev)
+            .float() * (-math.log(10000.0) / self.d_model)
+        )
+
+        # turn t into (batch, seq_len, 1)
+        t = t.unsqueeze(-1).to(dev)
+        # build a pe of shape (batch, seq_len, d_model)
+        pe = torch.zeros(t.shape[0], t.shape[1], self.d_model, device=dev)
         pe[..., 0::2] = torch.sin(t * div_term)
         pe[..., 1::2] = torch.cos(t * div_term)
+
+        # add & dropout
+        # broadcasting: x is (seq_len, batch, d_model) or (batch, seq_len, d_model)?
+        # If x is seq_len-first, transpose before add; else ensure dims match.
+        return self.dropout(x + pe[: x.size(0)] if x.ndim == 3 else x + pe)
         
-        x = x + pe[:x.size(0)]
-        return self.dropout(x)
+        # Commented out by yahya on 18/07, reason: (remove hard coding devices, lightning takes care of it)
+        # if torch.cuda.is_available():
+        #     self.device = torch.device('cuda:0')
+        # else:
+        #     self.device = torch.device("cpu")
+        # def forward(self, x, t):
+        #     pe = torch.zeros(self.max_len, self.d_model).to(self.device)
+            
+        #     div_term = torch.exp(torch.arange(0, self.d_model, 2).float() * (-math.log(10000.0) / self.d_model)).to(self.device)
+            
+        #     t = t.unsqueeze(-1)
+        #     pe = torch.zeros(*t.shape[:2], self.d_model).to(self.device)
+        #     pe[..., 0::2] = torch.sin(t * div_term)
+        #     pe[..., 1::2] = torch.cos(t * div_term)
+            
+        #     x = x + pe[:x.size(0)]
+        #     return self.dropout(x)
     
     
 """
 Encode time/space record to variational posterior for location latent
 """
 class Encoder(nn.Module):
-    def __init__(self, config, device):
+    # def __init__(self, config, device): ---- Commented out by yahya on 18/07, reason: (remove hard coding devices, lightning takes care of it)
+    def __init__(self, config):
         super().__init__()
         self.model_type = 'Transformer'
         self.pos_encoder = PositionalEncoding(config.emb_dim, config.dropout, 
@@ -63,7 +90,7 @@ class Encoder(nn.Module):
         self.encoder = nn.Linear(3, config.emb_dim, bias=False)
         self.decoder = nn.Linear(config.emb_dim, config.z_dim * 2)
         self.init_weights()
-        self.device = device
+        #self.device = device ---- Commented out by yahya on 18/07, reason: (remove hard coding devices, lightning takes care of it)
         
     def init_weights(self):
         initrange = 0.1
@@ -73,8 +100,9 @@ class Encoder(nn.Module):
 
     def encode(self, x, x_mask=None):
         x = x.transpose(1,0) # Convert to seq-len-first
+        dev = x.device # Added by yahya on 18/07, reason: (remove hard coding devices, lightning takes care of it)
         if x_mask is None:
-            x_mask = subsequent_mask(len(x)).to(self.device)
+            x_mask = subsequent_mask(len(x)).to(dev)
         t = torch.cumsum(x[..., -1], 0)
         x = self.encoder(x) * math.sqrt(self.ninp)
         x = self.pos_encoder(x, t)
@@ -198,16 +226,17 @@ def intensity(w_i, b_i, t_ti, s_diff, inv_var):
 STPP model with VAE: directly modeling λ(s,t)
 """
 class DeepSTPP(nn.Module):
-    def __init__(self, config, device):
+    # def __init__(self, config, device): ---- Commented out by yahya on 18/07, reason: (remove hard coding devices, lightning takes care of it)
+    def __init__(self, config): 
         super(DeepSTPP, self).__init__()
         self.config = config
         self.emb_dim = config.emb_dim
         self.hid_dim = config.hid_dim
-        self.device = device
+        #self.device = device
         
         # VAE for predicting spatial intensity
-        self.enc = Encoder(config, device)
-        
+        #self.enc = Encoder(config, device)
+        self.enc = Encoder(config)
         output_dim = config.seq_len + config.num_points
         self.w_dec = Decoder(config, output_dim, softplus=True)
         self.b_dec = Decoder(config, output_dim)
@@ -222,8 +251,8 @@ class DeepSTPP(nn.Module):
         self.num_points = config.num_points
         self.background = nn.Parameter(torch.rand((self.num_points, 2)), requires_grad=True)
         
-        self.optimizer = self.set_optimizer(config.opt, config.lr, config.momentum)
-        self.to(device)
+        # self.optimizer = self.set_optimizer(config.opt, config.lr, config.momentum)
+        # self.to(device) --- Commented out by yahya on 18/07, reason: (remove hard coding devices, lightning takes care of it)
 
 
     """
@@ -238,7 +267,10 @@ class DeepSTPP(nn.Module):
         t_cum = torch.cumsum(st_x[..., 2], -1)
         
         tn_ti = t_cum[..., -1:] - t_cum # t_n - t_i
-        tn_ti = torch.cat((tn_ti, torch.zeros(batch, self.num_points).to(self.device)), -1)
+        #tn_ti = torch.cat((tn_ti, torch.zeros(batch, self.num_points).to(self.device)), -1) ---Commented out by yahya on 18/07, reason: (remove hard coding devices, lightning takes care of it)
+        zeros = torch.zeros(batch, self.num_points, device=tn_ti.device)
+        tn_ti = torch.cat((tn_ti, zeros), dim=-1)
+        
         t_ti  = tn_ti + st_y[..., 2] # t - t_i
 
         [qm, qv], w_i, b_i, inv_var = self(st_x)
